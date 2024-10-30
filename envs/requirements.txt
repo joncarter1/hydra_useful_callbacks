@@ -1,0 +1,6 @@
+# Common extras I frequently use.
+GitPython
+hydra_core>=1.3.2 # Elegant application configuration from CLI + YAML files.
+omegaconf>=2.3.0
+hydra_colorlog>=1.2.0 # Hydra extension for colorful log outputs.
+mlflow==2.11.3

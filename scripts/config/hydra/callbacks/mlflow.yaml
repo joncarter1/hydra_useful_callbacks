@@ -1,0 +1,7 @@
+mlflow:
+  _target_: hydra_useful_callbacks.MLFlowCallback
+  experiment_name: example-experiment
+  tracking_uri: file:///tmp/mlruns
+  run_name: ${name}
+  nested: True
+  child_run_namer:

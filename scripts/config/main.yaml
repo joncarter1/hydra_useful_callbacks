@@ -1,0 +1,25 @@
+# Main Hydra configuration file.
+defaults:
+  - /hydra/callbacks:
+      - git
+      - mlflow
+      - timer
+# Pretty logging with hydra_colorlog
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+  - _self_
+
+name: test # Experiment run name
+input_val: 1
+
+hydra:
+  verbose: False
+  job_logging:
+    handlers:
+      file:
+        filename: /tmp/hydra/${hydra.job.name}_${oc.select:hydra.job.num, 0}.log
+  run:
+    dir: /tmp/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir:  /tmp/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

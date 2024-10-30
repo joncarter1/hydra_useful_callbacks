@@ -1,0 +1,13 @@
+# The Conda environment specification for hydra_callbacks
+name: hydra_callbacks
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+# Core pip packages
+    - -r requirements.txt
+# Linting and development
+    - -r requirements_dev.txt
