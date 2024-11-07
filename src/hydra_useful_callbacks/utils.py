@@ -10,14 +10,19 @@ logger = logging.getLogger(__name__)
 
 
 def is_rank_zero():
-    """Check if the current process is rank zero."""
+    """Check if the current process is rank zero.
+
+    This is a non-exhaustive check that assumes a PyTorch environment, which may be on a Slurm Cluster.
+    """
     for key in (
         'RANK',
         'LOCAL_RANK',
         'SLURM_PROCID',
     ):
-        if rank := os.environ.get(key) is not None:
-            return int(rank) == 0
+        rank = os.environ.get(key)
+        if rank is not None and int(rank) == 0:
+            return True
+
     return True
 
 

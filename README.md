@@ -34,7 +34,7 @@ Development
 --------
 
 ```
-conda env create --file envs/environment.yaml
+conda env create --file environment/conda.yaml
 pre-commit install
 pip install -e .
 ```
@@ -43,4 +43,8 @@ pip install -e .
 
 ### hydra-callbacks: https://github.com/paquiteau/hydra-callbacks
 
-Contains high-quality implementations of several useful Hydra callbacks.
+High-quality implementations of several useful Hydra callbacks.
+
+### hydra-ml-examples: https://github.com/joncarter1/hydra-ml-examples
+
+Minimal working examples of machine learning experiment configuration using Hydra.
