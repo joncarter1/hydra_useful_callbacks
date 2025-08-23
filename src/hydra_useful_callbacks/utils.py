@@ -9,22 +9,19 @@ import os
 logger = logging.getLogger(__name__)
 
 
-def is_rank_zero():
-    """Check if the current process is rank zero.
+def is_rank_zero() -> bool:
+    """Check if the current process is the main process or the rank zero process in a distributed training setup.
 
     This is a non-exhaustive check that assumes a PyTorch environment, which may be on a Slurm Cluster.
     """
-    for key in (
-        'RANK',
-        'LOCAL_RANK',
-        'SLURM_PROCID',
-    ):
+    rank_env_keys = ('RANK', 'LOCAL_RANK', 'SLURM_PROCID')
+    for key in rank_env_keys:
         rank = os.environ.get(key)
-        if rank is not None and int(rank) == 0:
-            return True
-
-    return False
-
+        if rank is not None:
+            return int(rank) == 0
+    else:  # Will be unset in main process.
+        logger.debug(f'None of {rank_env_keys} are set. Assuming rank zero.')
+        return True
 
 def rank_zero_only(method):
     """Decorator to perform commands only on rank zero process."""
