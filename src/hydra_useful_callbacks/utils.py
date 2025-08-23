@@ -23,7 +23,7 @@ def is_rank_zero():
         if rank is not None and int(rank) == 0:
             return True
 
-    return True
+    return False
 
 
 def rank_zero_only(method):
