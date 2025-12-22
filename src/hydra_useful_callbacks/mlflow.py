@@ -10,9 +10,9 @@ import os
 import shutil
 import tempfile
 from typing import Any, Callable, Optional
-import os
+
 import hydra
-import mlflow  # type: ignore
+import mlflow
 from hydra.core.utils import JobReturn
 from hydra.experimental.callback import Callback
 from hydra.types import RunMode
@@ -208,7 +208,10 @@ def _infer_job_count(config: DictConfig) -> int:
     cli_keys = []
     if task_overrides is not None:
         for el in task_overrides:
-            k, vs = el.split('=')
+            # Only split on the first '=' so that override values are
+            # allowed to contain '=' characters (e.g. file paths with
+            # encoded metadata like 'epoch=04-val_loss=0.52').
+            k, vs = el.split('=', maxsplit=1)
             cli_keys.append(k)
             sweep_vals = vs.split(',')
             job_count *= len(sweep_vals)
