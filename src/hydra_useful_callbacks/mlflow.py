@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 
 import hydra
 import mlflow
+from mlflow.exceptions import MlflowException
 from hydra.core.utils import JobReturn
 from hydra.experimental.callback import Callback
 from hydra.types import RunMode
@@ -33,11 +34,11 @@ class MLFlowCallback(Callback):
     def __init__(
         self,
         experiment_name: str,
-        run_name: str,
         tracking_uri: str,
+        run_name: str | None = None,
+        run_id: str | None = None,
         artifact_location: str | None = None,
         nested: bool = True,
-        resume: bool = False,
         config_file_name: str | None = 'hydra_config.yaml',
         child_run_namer: Optional[str] = None,
     ) -> None:
@@ -45,24 +46,27 @@ class MLFlowCallback(Callback):
 
         Args:
             experiment_name: MLFlow experiment to log to.
-            run_name: MLFlow run name for single jobs. Parent run name for multi-run jobs.
             tracking_uri: Tracking URI of the MLFlow server to log to.
+            run_name: MLFlow run name for single jobs. Parent run name for multi-run jobs.
+                When None and resuming, preserves the existing run's name. When None and
+                creating a new run, MLFlow auto-generates one.
+            run_id: ID of an existing MLFlow run to resume. When set, the run is reopened
+                instead of creating a new one.
             artifact_location: Artifact location to log to.
             nested: Whether to nest multiple runs under a parent when in multi-run mode.
-            resume: TODO: Resume an existing run. If True, the run_name must be the name of a unique existing run.
             config_file_name: Name for the file used to log the Hydra job config. Or None to skip.
-            child_namer: Import path to a Python function for naming MLFlow child runs.
+            child_run_namer: Import path to a Python function for naming MLFlow child runs.
                 The imported function should take the same arguments as `default_child_run_namer`.
         """
         self.experiment_name = experiment_name
         self.tracking_uri = tracking_uri
         self.run_name = run_name
+        self.run_id = run_id
         self.artifact_location = artifact_location
         self.parent_run_id = None
         self.child_run_id = None
         self.nested = nested
         self.multiple_jobs = False
-        self.resume = resume  # TODO: Implement resume functionality
         self.config_file_name = config_file_name
         if child_run_namer is None:
             self.child_run_namer = default_child_run_namer
@@ -71,6 +75,24 @@ class MLFlowCallback(Callback):
                 {'_target_': child_run_namer, '_partial_': True}
             )
         logger.debug('Created Hydra MLFlow callback.')
+
+    def _validate_run_for_resume(self, run_id: str) -> None:
+        """Validate that a run exists and belongs to the configured experiment."""
+        try:
+            run = mlflow.get_run(run_id)
+        except MlflowException:
+            raise MLFlowError(f'Cannot resume: run {run_id} not found.')
+        experiment = mlflow.get_experiment_by_name(self.experiment_name)
+        if experiment is not None and run.info.experiment_id != experiment.experiment_id:
+            raise MLFlowError(
+                f'Run {run_id} belongs to experiment {run.info.experiment_id}, '
+                f'not "{self.experiment_name}".'
+            )
+        status = run.info.status
+        if status == 'RUNNING':
+            logger.warning(f'Run {run_id} has status RUNNING — may be in use by another process.')
+        else:
+            logger.info(f'Resuming run {run_id} (previous status: {status}).')
 
     def setup(self) -> None:
         """Set-up MLFlow connection."""
@@ -91,11 +113,15 @@ class MLFlowCallback(Callback):
         if not self.nested:
             return
         self.setup()
-        if self.resume:
-            raise MLFlowError('Resume functionality not yet implemented.')
+        if self.run_id is not None:
+            self._validate_run_for_resume(self.run_id)
+            mlflow.start_run(run_id=self.run_id, run_name=self.run_name)
         else:
             mlflow.start_run(run_name=self.run_name)
         self.parent_run_id = mlflow.active_run().info.run_id
+        # Resolve run_name for child naming (e.g. when resuming without a name)
+        if self.run_name is None:
+            self.run_name = mlflow.active_run().info.run_name
         if self.config_file_name is not None:
             mlflow.log_dict(OmegaConf.to_container(config), self.config_file_name)
             logger.debug('Logged config.')
@@ -127,9 +153,16 @@ class MLFlowCallback(Callback):
             run_name = self.run_name
         # Only nest if specified and in multi-run mode
         nested = self.nested and config.hydra.mode == RunMode.MULTIRUN
-        if self.resume:
-            raise MLFlowError('Resume functionality not yet implemented.')
-        active_run = mlflow.start_run(run_name=run_name, nested=nested)
+        # Detect invalid config: can't resume one run_id across multiple non-nested jobs
+        if self.run_id is not None and config.hydra.mode == RunMode.MULTIRUN and not self.nested and self.multiple_jobs:
+            raise MLFlowError('Cannot resume a single run_id across multiple non-nested jobs. Use nested=True.')
+        if self.run_id is not None and not nested:
+            # Single-run resume (or non-nested multirun with 1 job)
+            self._validate_run_for_resume(self.run_id)
+            active_run = mlflow.start_run(run_id=self.run_id, run_name=self.run_name)
+        else:
+            # New run: normal case, or new child under a resumed parent
+            active_run = mlflow.start_run(run_name=run_name, nested=nested)
         # Set env. var to connect to the run from other modules within the job.
         os.environ['MLFLOW_RUN_ID'] = active_run.info.run_id
         # Fetch the artifact uri root directory
@@ -138,7 +171,10 @@ class MLFlowCallback(Callback):
         # Log hydra CLI overrides as run parameters.
         override_dict = parse_overrides(config)
         if override_dict is not None:
-            mlflow.log_params(override_dict)
+            try:
+                mlflow.log_params(override_dict)
+            except MlflowException as e:
+                logger.warning(f'Could not log overrides (param conflict with existing run): {e}')
         if self.config_file_name is not None:
             mlflow.log_dict(OmegaConf.to_container(config), self.config_file_name)
             logger.debug('Logged job config.')

@@ -3,5 +3,6 @@ mlflow:
   experiment_name: example-experiment
   tracking_uri: file:///tmp/mlruns
   run_name: ${name}
+  run_id: null
   nested: True
   child_run_namer:
