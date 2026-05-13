@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 from typing import Any, Callable, Optional
+from uuid import uuid4
 
 import hydra
 import mlflow
@@ -22,6 +23,8 @@ from omegaconf import DictConfig, OmegaConf
 from .utils import exit_on_error, parse_overrides, rank_zero_only
 
 logger = logging.getLogger(__name__)
+
+LOGICAL_KEY_TAG = 'hydra_useful_callbacks_logical_key'
 
 
 class MLFlowError(Exception):
@@ -68,6 +71,10 @@ class MLFlowCallback(Callback):
         self.nested = nested
         self.multiple_jobs = False
         self.config_file_name = config_file_name
+        # Host-allocated UUID for keying logical jobs in single-run / non-nested
+        # multirun modes. Survives the host->worker pickle so launcher replays
+        # build the same logical_key and resume the same MLflow run.
+        self.host_launch_id: str = uuid4().hex
         if child_run_namer is None:
             self.child_run_namer = default_child_run_namer
         else:
@@ -157,12 +164,32 @@ class MLFlowCallback(Callback):
         if self.run_id is not None and config.hydra.mode == RunMode.MULTIRUN and not self.nested and self.multiple_jobs:
             raise MLFlowError('Cannot resume a single run_id across multiple non-nested jobs. Use nested=True.')
         if self.run_id is not None and not nested:
-            # Single-run resume (or non-nested multirun with 1 job)
+            # User-supplied resume (single-run or non-nested multirun with 1 job)
             self._validate_run_for_resume(self.run_id)
             active_run = mlflow.start_run(run_id=self.run_id, run_name=self.run_name)
         else:
-            # New run: normal case, or new child under a resumed parent
-            active_run = mlflow.start_run(run_name=run_name, nested=nested)
+            # Idempotent lookup: if a previous attempt of this logical job tagged
+            # a run with our logical_key, resume it; otherwise create a fresh run
+            # tagged atomically so subsequent replays find it.
+            scope_id = self.parent_run_id or self.host_launch_id
+            job_num = getattr(config.hydra.job, 'num', 0)
+            logical_key = f'{scope_id}:{job_num}'
+            experiment = mlflow.get_experiment_by_name(self.experiment_name)
+            existing = mlflow.search_runs(
+                experiment_ids=[experiment.experiment_id],
+                filter_string=f"tags.{LOGICAL_KEY_TAG} = '{logical_key}'",
+                max_results=1,
+                output_format='list',  # avoid pandas dep (mlflow-skinny compat)
+            )
+            if existing:
+                logger.info(f'Resuming existing run for {logical_key=}')
+                active_run = mlflow.start_run(run_id=existing[0].info.run_id, nested=nested)
+            else:
+                active_run = mlflow.start_run(
+                    run_name=run_name,
+                    nested=nested,
+                    tags={LOGICAL_KEY_TAG: logical_key},
+                )
         # Set env. var to connect to the run from other modules within the job.
         os.environ['MLFLOW_RUN_ID'] = active_run.info.run_id
         # Fetch the artifact uri root directory
