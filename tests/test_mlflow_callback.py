@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import mlflow
 import pytest
+from hydra.types import RunMode
 from mlflow.exceptions import MlflowException
+from omegaconf import OmegaConf
 
 from hydra_useful_callbacks.mlflow import LOGICAL_KEY_TAG, MLFlowCallback, MLFlowError
 
@@ -84,18 +86,25 @@ class TestValidateRunForResume:
 
 
 def _make_hydra_config(mode, overrides=None, job_num=0, sweep_params=None):
-    """Build a minimal mock hydra config."""
-    hydra_cfg = SimpleNamespace(
-        mode=mode,
-        overrides=SimpleNamespace(task=overrides or []),
-        sweeper=SimpleNamespace(params=sweep_params),
-        job=SimpleNamespace(num=job_num),
-        runtime=SimpleNamespace(output_dir='/tmp/out'),
-        sweep=SimpleNamespace(dir='/tmp/sweep'),
+    """Build a minimal *real* OmegaConf hydra config.
+
+    Uses a real DictConfig rather than a MagicMock/SimpleNamespace so that
+    OmegaConf semantics (notably mandatory-missing '???' values) are actually
+    exercised. The previous mock-based helper is why the v0.2.0 single-run
+    MissingMandatoryValue bug shipped despite a green suite.
+    """
+    return OmegaConf.create(
+        {
+            'hydra': {
+                'mode': mode,
+                'overrides': {'task': list(overrides) if overrides else []},
+                'sweeper': {'params': sweep_params},
+                'job': {'num': job_num},
+                'runtime': {'output_dir': '/tmp/out'},
+                'sweep': {'dir': '/tmp/sweep'},
+            }
+        }
     )
-    config = MagicMock()
-    config.hydra = hydra_cfg
-    return config
 
 
 class TestOnMultirunStart:
@@ -464,3 +473,118 @@ class TestIdempotentJobStartIntegration:
         run_b = os.environ['MLFLOW_RUN_ID']
 
         assert run_a != run_b
+
+
+def _make_real_single_run_config(output_dir='/tmp'):
+    """A *real* OmegaConf config mirroring how Hydra leaves a single-RUN job.
+
+    The key detail the SimpleNamespace-based ``_make_hydra_config`` never
+    reproduces: in single-RUN mode Hydra leaves ``hydra.job.num`` (and
+    ``hydra.sweep.dir``) mandatory-missing (``'???'``). Attribute access on
+    such a node raises ``MissingMandatoryValue`` — *not* ``AttributeError`` —
+    so ``getattr(config.hydra.job, 'num', 0)`` does not fall back to the
+    default. These tests exist to catch exactly that regression.
+    """
+    return OmegaConf.create(
+        {
+            'hydra': {
+                'mode': RunMode.RUN,
+                'job': {'num': '???'},
+                'sweep': {'dir': '???'},
+                'runtime': {'output_dir': output_dir},
+                'overrides': {'task': []},
+            }
+        }
+    )
+
+
+class TestSingleRunMissingJobNum:
+    """Regression: single-RUN jobs must not crash on mandatory-missing job.num.
+
+    Reproduces the v0.2.0 failure where the idempotent-resume branch in
+    on_job_start did ``getattr(config.hydra.job, 'num', 0)``; on a real Hydra
+    single-run config that raises MissingMandatoryValue instead of returning 0.
+    """
+
+    def test_real_config_reproduces_missing_value_semantics(self):
+        """Guard the test's own premise: getattr default does NOT cover '???'."""
+        from omegaconf.errors import MissingMandatoryValue
+
+        config = _make_real_single_run_config()
+        with pytest.raises(MissingMandatoryValue):
+            getattr(config.hydra.job, 'num', 0)
+        # The fix's mechanism, by contrast, yields the default.
+        assert OmegaConf.select(config, 'hydra.job.num', default=0) == 0
+
+    @patch('hydra_useful_callbacks.mlflow.mlflow')
+    @patch('hydra_useful_callbacks.mlflow.parse_overrides', return_value=None)
+    @patch.object(MLFlowCallback, 'setup')
+    def test_single_run_new_run_does_not_raise(self, mock_setup, mock_parse, mock_mlflow):
+        cb = MLFlowCallback(
+            experiment_name='test-exp', tracking_uri='uri', run_name='my-run',
+            config_file_name=None,
+        )
+        config = _make_real_single_run_config()
+        mock_mlflow.start_run.return_value = _make_run_info(run_id='fresh-id')
+        _mock_no_existing_tagged_run(mock_mlflow)
+        # Pre-fix this raised MissingMandatoryValue at the job_num lookup.
+        MLFlowCallback.on_job_start.__wrapped__.__wrapped__(cb, config)
+        mock_mlflow.start_run.assert_called_once_with(
+            run_name='my-run',
+            nested=False,
+            tags={LOGICAL_KEY_TAG: f'{cb.host_launch_id}:0'},
+        )
+
+    @patch('hydra_useful_callbacks.mlflow.mlflow')
+    @patch('hydra_useful_callbacks.mlflow.parse_overrides', return_value=None)
+    @patch.object(MLFlowCallback, 'setup')
+    def test_single_run_replay_resumes_tagged_run(self, mock_setup, mock_parse, mock_mlflow):
+        """The exact production scenario: a launcher replay of a single run."""
+        cb = MLFlowCallback(
+            experiment_name='test-exp', tracking_uri='uri', run_name='my-run',
+            config_file_name=None,
+        )
+        config = _make_real_single_run_config()
+        mock_mlflow.get_experiment_by_name.return_value = _make_experiment()
+        mock_mlflow.search_runs.return_value = _search_results(['existing-run-id'])
+        mock_mlflow.start_run.return_value = _make_run_info(run_id='existing-run-id')
+        MLFlowCallback.on_job_start.__wrapped__.__wrapped__(cb, config)
+        mock_mlflow.start_run.assert_called_once_with(run_id='existing-run-id', nested=False)
+        assert os.environ['MLFLOW_RUN_ID'] == 'existing-run-id'
+
+    @patch('hydra_useful_callbacks.mlflow.get_submitit_files_for_logging')
+    @patch('hydra_useful_callbacks.mlflow.mlflow')
+    def test_on_job_end_single_run_skips_submitit(
+        self, mock_mlflow, mock_submitit, callback, tmp_path
+    ):
+        """on_job_end must not touch hydra.job.num / sweep.dir in single-RUN."""
+        config = _make_real_single_run_config(output_dir=str(tmp_path))
+        mock_mlflow.active_run.return_value = _make_run_info(run_id='r')
+        MLFlowCallback.on_job_end.__wrapped__.__wrapped__(
+            callback, config, job_return=MagicMock()
+        )
+        mock_submitit.assert_not_called()
+        mock_mlflow.end_run.assert_called_once()
+
+    @patch('hydra_useful_callbacks.mlflow.get_submitit_files_for_logging', return_value=[])
+    @patch('hydra_useful_callbacks.mlflow.mlflow')
+    def test_on_job_end_multirun_still_logs_submitit(
+        self, mock_mlflow, mock_submitit, callback, tmp_path
+    ):
+        """The RunMode gate must not regress multirun submitit logging."""
+        config = OmegaConf.create(
+            {
+                'hydra': {
+                    'mode': RunMode.MULTIRUN,
+                    'job': {'num': 2},
+                    'sweep': {'dir': '/some/sweep'},
+                    'runtime': {'output_dir': str(tmp_path)},
+                    'overrides': {'task': []},
+                }
+            }
+        )
+        mock_mlflow.active_run.return_value = _make_run_info(run_id='r')
+        MLFlowCallback.on_job_end.__wrapped__.__wrapped__(
+            callback, config, job_return=MagicMock()
+        )
+        mock_submitit.assert_called_once_with('/some/sweep', 2)

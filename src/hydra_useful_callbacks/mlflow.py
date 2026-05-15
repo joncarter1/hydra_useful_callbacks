@@ -172,7 +172,13 @@ class MLFlowCallback(Callback):
             # a run with our logical_key, resume it; otherwise create a fresh run
             # tagged atomically so subsequent replays find it.
             scope_id = self.parent_run_id or self.host_launch_id
-            job_num = getattr(config.hydra.job, 'num', 0)
+            # In single-RUN mode Hydra leaves hydra.job.num mandatory-missing
+            # ('???'). getattr(..., 0) does NOT cover that case: attribute
+            # access on a missing-mandatory key raises MissingMandatoryValue
+            # (not AttributeError), so the default never applies. OmegaConf.select
+            # defaults to throw_on_missing=False, returning the default for both
+            # an absent key and a '???' value.
+            job_num = OmegaConf.select(config, 'hydra.job.num', default=0)
             logical_key = f'{scope_id}:{job_num}'
             experiment = mlflow.get_experiment_by_name(self.experiment_name)
             existing = mlflow.search_runs(
@@ -212,8 +218,12 @@ class MLFlowCallback(Callback):
         """Upload log files, including anything from submitit."""
         # Log the output directory logs.
         fps_for_logging = get_files_for_logging(config.hydra.runtime.output_dir)
-        # Log .submitit files if present.
-        if 'num' in config.hydra.job:  # Check for multirun
+        # Log .submitit files if present. Only multirun jobs have a resolved
+        # hydra.job.num; in single-RUN mode it is mandatory-missing ('???').
+        # Gate on the run mode explicitly rather than `'num' in config.hydra.job`
+        # — the latter only happens to work because `in` returns False for a
+        # '???' key in OmegaConf, which is fragile and easy to misread.
+        if config.hydra.mode == RunMode.MULTIRUN:
             fps_for_logging += get_submitit_files_for_logging(config.hydra.sweep.dir, config.hydra.job.num)
         with tempfile.TemporaryDirectory() as tmp_dir:
             for fp in fps_for_logging:

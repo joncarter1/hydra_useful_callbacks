@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-15
+
+### Fixed
+- `MLFlowCallback` no longer crashes single-RUN jobs. The idempotent-resume branch added in 0.2.0 read the job number via `getattr(config.hydra.job, 'num', 0)`; in single-RUN mode Hydra leaves `hydra.job.num` mandatory-missing (`???`), and attribute access on such a node raises `MissingMandatoryValue` rather than `AttributeError`, so the `0` default never applied and any single-run launcher replay died on entry to this path. Now uses `OmegaConf.select(config, 'hydra.job.num', default=0)`, which returns the default for both absent and `???` values.
+
+### Changed
+- `on_job_end` now gates submitit-log collection on `config.hydra.mode == RunMode.MULTIRUN` (the explicit check used elsewhere in the callback) instead of `'num' in config.hydra.job`. The old check was not broken — `in` returns `False` for a `???` key — but relied on a subtle OmegaConf interaction; the explicit form is version-independent and self-documenting.
+- Test suite now builds real OmegaConf configs instead of `MagicMock`/`SimpleNamespace`, so mandatory-missing (`???`) semantics are actually exercised. The mock-based helper is why the 0.2.0 regression shipped against a green suite.
+
 ## [0.2.0] — 2026-05-13
 
 ### Added
@@ -15,5 +24,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 - README rewritten to document each callback's behaviour, show typical YAML wiring, and update install/dev instructions for the current `uv`-based workflow.
 
-[Unreleased]: https://github.com/joncarter1/hydra_useful_callbacks/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/joncarter1/hydra_useful_callbacks/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/joncarter1/hydra_useful_callbacks/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/joncarter1/hydra_useful_callbacks/releases/tag/v0.2.0
